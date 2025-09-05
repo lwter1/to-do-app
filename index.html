@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+   <meta charset="UTF-8">
+   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+   <title>待办事项应用</title>
+   <link rel="icon" href="https://placehold.co/192x192/007bff/ffffff?text=Todo">
+   <link rel="apple-touch-icon" href="https://placehold.co/192x192/007bff/ffffff?text=Todo">
+   <meta name="theme-color" content="#ffffff">
+   <link rel="manifest" href="data:application/json;base64,eyJpY29ucyI6W3sic2l6ZXMiOiIxOTJ4MTkyIiwiZm9ybWF0IjoicG5nIiwic2NyZWVuX3NpeHoiOiIxLjUiLCJzcmMiOiJodHRwczovL3BsYWNlaG9sZC5jby8xOTJ4MTkyLzAwN2JmZi9mZmZmZmY_dGV4dD1Ub2RvIn0sInNpemVzIjoiNTEyeDUxMiIsImZvcm1hdCI6InBuZyIsInNjcmVlbl9zaXh6IjoiMS41Iiwic3JjIjoiaHR0cHM6Ly9wbGFjZWhvbGQuY28vNTEyeDUxMi8wMDdiZmYvZmZmZmZmP3RleHQ9VG9kbyJ9XSwic3RhcnRfdXJsIjoiLi8iLCJkaXNwbGF5Ijoic3RhbmRhbG9uZSIsIm5hbWUiOiLojpPlj5Hluqblm57msZMiLCJzaG9ydF9uYW1lIjoi5Yqf6Zy45piv5LiN57q/In0=">
+   <style>
+     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+     body, html, #root {
+         font-family: 'Inter', sans-serif;
+         height: 100%;
+         margin: 0;
+         padding: 0;
+         overflow: hidden;
+         -webkit-tap-highlight-color: transparent; /* Remove tap highlight on mobile */
+     }
+   </style>
+</head>
+<body>
+   <div id="root"></div>
+
+   <script type="module">
+       import React, { useState, useEffect, useMemo, useCallback } from 'https://esm.sh/react@18.2.0';
+       import ReactDOM from 'https://esm.sh/react-dom@18.2.0';
+       import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+       import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+       import { getFirestore, collection, query, onSnapshot, addDoc, updateDoc, deleteDoc, doc, setDoc, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+       import { getStorage, ref, uploadBytesResumable, getDownloadURL } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-storage.js";
+
+       // Service Worker registration
+       if ('serviceWorker' in navigator) {
+           window.addEventListener('load', () => {
+               navigator.serviceWorker.register('/service-worker.js', { scope: '/' })
+                   .then(registration => console.log('Service Worker registered:', registration))
+                   .catch(error => console.log('Service Worker registration failed:', error));
+           });
+       }
+   </script>
+   <script>
+     // Service Worker content (inlined for simplicity)
+     self.addEventListener('install', (event) => {
+       event.waitUntil(
+         caches.open('todo-app-cache').then((cache) => {
+           return cache.addAll([
+             '/',
+             '/index.html',
+             'https://cdn.tailwindcss.com',
+             'https://esm.sh/react@18.2.0',
+             'https://esm.sh/react-dom@18.2.0',
+             'https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js',
+             'https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js',
+             'https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js',
+             'https://www.gstatic.com/firebasejs/11.6.1/firebase-storage.js',
+           ]);
+         })
+       );
+     });
+
+     self.addEventListener('fetch', (event) => {
+       event.respondWith(
+         caches.match(event.request).then((response) => {
+           return response || fetch(event.request);
+         })
+       );
+     });
+   </script>
+   <script type="module">
+       const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+       const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+       const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : '';
+
+       const App = () => {
+         const [db, setDb] = useState(null);
+         const [auth, setAuth] = useState(null);
+         const [userId, setUserId] = useState(null);
+         const [loading, setLoading] = useState(true);
+         const [todos, setTodos] = useState([]);
+         const [checkins, setCheckins] = useState([]);
+         const [newTask, setNewTask] = useState('');
+         const [filter, setFilter] = useState('all');
+         const [isEditing, setIsEditing] = useState(null);
+         const [editingText, setEditingText] = useState('');
+         const [showEditModal, setShowEditModal] = useState(false);
+         const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+         const [showMnemonicModal, setShowMnemonicModal] = useState(true);
+         
+         const [userName, setUserName] = useState('您的名字');
+         const [userAvatarUrl, setUserAvatarUrl] = useState('');
+         
+         const [showAttachmentModal, setShowAttachmentModal] = useState(false);
+         const [currentTodoToAttach, setCurrentTodoToAttach] = useState(null);
+         const [fileToUpload, setFileToUpload] = useState(null);
+         const [uploadProgress, setUploadProgress] = useState(0);
+         const [uploading, setUploading] = useState(false);
+         
+         const [currentView, setCurrentView] = useState('todos');
+
+         const mnemonicPhrase = localStorage.getItem('mnemonicPhrase') || '';
+         const mnemonicUserId = useMemo(() => {
+           if (!mnemonicPhrase) return null;
+           let hash = 0;
+           for (let i = 0; i < mnemonicPhrase.length; i++) {
+             const char = mnemonicPhrase.charCodeAt(i);
+             hash = ((hash << 5) - hash) + char;
+             hash |= 0;
+           }
+           return Math.abs(hash).toString(36);
+         }, [mnemonicPhrase]);
+
+         useEffect(() => {
+           try {
+             const app = initializeApp(firebaseConfig);
+             const authInstance = getAuth(app);
+             const dbInstance = getFirestore(app);
+
+             setAuth(authInstance);
+             setDb(dbInstance);
+
+             onAuthStateChanged(authInstance, async (user) => {
+               if (user) {
+                 console.log('User signed in:', user.uid);
+                 setUserId(mnemonicUserId || user.uid);
+               } else {
+                 console.log('No user signed in, signing in anonymously...');
+                 if (initialAuthToken) {
+                   await signInWithCustomToken(authInstance, initialAuthToken);
+                 } else {
+                   await signInAnonymously(authInstance);
+                 }
+               }
+             });
+           } catch (error) {
+             console.error('Firebase initialization error:', error);
+             setLoading(false);
+           }
+         }, [mnemonicUserId]);
+         
+         useEffect(() => {
+           if (db && userId) {
+             const todosQuery = query(collection(db, `artifacts/${appId}/public/data/todos/${userId}/tasks`));
+             const unsubscribeTodos = onSnapshot(todosQuery, (querySnapshot) => {
+               const todosArray = querySnapshot.docs.map(doc => ({
+                 id: doc.id,
+                 ...doc.data()
+               }));
+               setTodos(todosArray.sort((a, b) => b.timestamp - a.timestamp));
+               setLoading(false);
+             }, (error) => {
+               console.error('Firestore todos subscription error:', error);
+               setLoading(false);
+             });
+
+             const checkinsQuery = query(collection(db, `artifacts/${appId}/public/data/checkins/${userId}/dates`));
+             const unsubscribeCheckins = onSnapshot(checkinsQuery, (querySnapshot) => {
+               const checkinsArray = querySnapshot.docs.map(doc => doc.data().date);
+               setCheckins(checkinsArray);
+             }, (error) => {
+               console.error('Firestore checkins subscription error:', error);
+             });
+             
+             const profileDocRef = doc(db, `artifacts/${appId}/public/data/profiles/${userId}`);
+             const unsubscribeProfile = onSnapshot(profileDocRef, (docSnap) => {
+               if (docSnap.exists()) {
+                 const profileData = docSnap.data();
+                 setUserName(profileData.name || '您的名字');
+                 setUserAvatarUrl(profileData.avatarUrl || '');
+               } else {
+                 setUserName('您的名字');
+                 setUserAvatarUrl('');
+               }
+             }, (error) => {
+               console.error('Firestore profile subscription error:', error);
+             });
+
+             return () => {
+               unsubscribeTodos();
+               unsubscribeCheckins();
+               unsubscribeProfile();
+             };
+           }
+         }, [db, userId]);
+
+         const handleMnemonicLogin = () => {
+           const mnemonicInput = document.getElementById('mnemonic-input').value;
+           if (mnemonicInput.trim()) {
+             localStorage.setItem('mnemonicPhrase', mnemonicInput);
+             setUserId(mnemonicUserId);
+             setShowMnemonicModal(false);
+           }
+         };
+
+         const saveUserProfile = async () => {
+           if (db && userId) {
+             try {
+               const profileDocRef = doc(db, `artifacts/${appId}/public/data/profiles/${userId}`);
+               await setDoc(profileDocRef, {
+                 name: userName,
+                 avatarUrl: userAvatarUrl
+               }, { merge: true });
+               console.log('User profile saved successfully!');
+               setIsSidebarOpen(false);
+             } catch (error) {
+               console.error('Error saving user profile:', error);
+             }
+           }
+         };
+
+         const handleInputChange = (e) => {
+           setNewTask(e.target.value);
+         };
+
+         const handleAddTodo = async (e) => {
+           e.preventDefault();
+           if (newTask.trim() === '' || !userId) return;
+
+           if (db) {
+             try {
+               await addDoc(collection(db, `artifacts/${appId}/public/data/todos/${userId}/tasks`), {
+                 text: newTask,
+                 completed: false,
+                 timestamp: Date.now()
+               });
+               setNewTask('');
+             } catch (error) {
+               console.error('Error adding document: ', error);
+             }
+           }
+         };
+
+         const handleToggleCompleted = async (todoId, completed) => {
+           if (db && userId) {
+             try {
+               await updateDoc(doc(db, `artifacts/${appId}/public/data/todos/${userId}/tasks`, todoId), {
+                 completed: !completed
+               });
+             } catch (error) {
+               console.error('Error updating document: ', error);
+             }
+           }
+         };
+
+         const handleDeleteTodo = async (todoId) => {
+           if (db && userId) {
+             try {
+               await deleteDoc(doc(db, `artifacts/${appId}/public/data/todos/${userId}/tasks`, todoId));
+             } catch (error) {
+               console.error('Error deleting document: ', error);
+             }
+           }
+         };
+
+         const startEditing = (todo) => {
+           setIsEditing(todo.id);
+           setEditingText(todo.text);
+           setShowEditModal(true);
+         };
+
+         const saveEdit = async () => {
+           if (db && userId && isEditing && editingText.trim() !== '') {
+             try {
+               await updateDoc(doc(db, `artifacts/${appId}/public/data/todos/${userId}/tasks`, isEditing), {
+                 text: editingText
+               });
+               setIsEditing(null);
+               setEditingText('');
+               setShowEditModal(false);
+             } catch (error) {
+               console.error('Error updating document: ', error);
+             }
+           }
+         };
+         
+         const handleFileChange = (e) => {
+           const file = e.target.files[0];
+           if (file) {
+             setFileToUpload(file);
+           }
+         };
+
+         const handleDrop = useCallback((e) => {
+           e.preventDefault();
+           const file = e.dataTransfer.files[0];
+           if (file) {
+             setFileToUpload(file);
+           }
+         }, []);
+
+         const handleDragOver = (e) => {
+           e.preventDefault();
+         };
+
+         const uploadFile = async () => {
+           if (!fileToUpload || !db || !userId || !currentTodoToAttach) return;
+
+           setUploading(true);
+           setUploadProgress(0);
+
+           const storage = getStorage();
+           const storageRef = ref(storage, `artifacts/${appId}/public/data/todos/${userId}/attachments/${currentTodoToAttach.id}/${fileToUpload.name}`);
+           const uploadTask = uploadBytesResumable(storageRef, fileToUpload);
+
+           uploadTask.on('state_changed',
+             (snapshot) => {
+               const progress = (snapshot.bytesTransferred / snapshot.totalBytes) * 100;
+               setUploadProgress(progress);
+             },
+             (error) => {
+               console.error('Error during upload:', error);
+               setUploading(false);
+             },
+             () => {
+               getDownloadURL(uploadTask.snapshot.ref).then(async (downloadURL) => {
+                 try {
+                   const fileType = fileToUpload.type.startsWith('image/') ? 'image' : 'file';
+                   await updateDoc(doc(db, `artifacts/${appId}/public/data/todos/${userId}/tasks`, currentTodoToAttach.id), {
+                     attachment: {
+                       url: downloadURL,
+                       type: fileType,
+                       name: fileToUpload.name
+                     }
+                   });
+                   setShowAttachmentModal(false);
+                   setUploading(false);
+                   setFileToUpload(null);
+                   setUploadProgress(0);
+                 } catch (error) {
+                   console.error('Error updating document with attachment URL:', error);
+                   setUploading(false);
+                 }
+               });
+             }
+           );
+         };
+         
+         const openAttachmentModal = (todo) => {
+           setCurrentTodoToAttach(todo);
+           setFileToUpload(null);
+           setShowAttachmentModal(true);
+         };
+         
+         const removeAttachment = async () => {
+           if (db && userId && currentTodoToAttach) {
+             try {
+               await updateDoc(doc(db, `artifacts/${appId}/public/data/todos/${userId}/tasks`, currentTodoToAttach.id), {
+                 attachment: null
+               });
+               setShowAttachmentModal(false);
+             } catch (error) {
+               console.error('Error removing attachment:', error);
+             }
+           }
+         };
+
+         const filteredTodos = todos.filter(todo => {
+           if (filter === 'all') return true;
+           if (filter === 'active') return !todo.completed;
+           if (filter === 'completed') return todo.completed;
+           return true;
+         });
+
+         const remainingTasks = todos.filter(todo => !todo.completed).length;
+
+         const today = new Date().toISOString().slice(0, 10);
+         const currentMonth = new Date().getMonth();
+         const currentYear = new Date().getFullYear();
+
+         const handleCheckIn = async () => {
+           if (db && userId) {
+             const todayExists = checkins.includes(today);
+             if (!todayExists) {
+               try {
+                 await addDoc(collection(db, `artifacts/${appId}/public/data/checkins/${userId}/dates`), {
+                   date: today
+                 });
+                 console.log('Successfully checked in for today!');
+               } catch (error) {
+                 console.error('Error checking in:', error);
+               }
+             }
+           }
+         };
+
+         const getCalendarDays = () => {
+           const startDay = new Date(currentYear, currentMonth, 1).getDay();
+           const daysInMonth = new Date(currentYear, currentMonth + 1, 0).getDate();
+           const days = Array.from({ length: startDay }, () => null);
+           days.push(...Array.from({ length: daysInMonth }, (_, i) => i + 1));
+           return days;
+         };
+
+         const calculateStreak = () => {
+           if (checkins.length === 0) return 0;
+           const sortedDates = checkins.slice().sort();
+           let streak = 0;
+           let currentStreak = 0;
+           let lastDate = null;
+           
+           for(const date of sortedDates) {
+             const currentDate = new Date(date);
+             if (lastDate === null || (currentDate.getTime() - lastDate.getTime()) / (1000 * 3600 * 24) === 1) {
+               currentStreak++;
+             } else if ((currentDate.getTime() - lastDate.getTime()) / (1000 * 3600 * 24) > 1) {
+               currentStreak = 1;
+             }
+             streak = Math.max(streak, currentStreak);
+             lastDate = currentDate;
+           }
+           return streak;
+         };
+         
+         const checkinStreak = calculateStreak();
+
+         return (
+           <div className="flex flex-col h-screen bg-gray-100 font-sans relative overflow-hidden">
+             <style>{`
+               @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+               body {
+                   font-family: 'Inter', sans-serif;
+               }
+               .sidebar {
+                 transform: translateX(-100%);
+                 transition: transform 0.3s ease-in-out;
+               }
+               .sidebar.open {
+                 transform: translateX(0);
+               }
+             `}</style>
+             <script src="https://cdn.tailwindcss.com"></script>
+             
+             <div className="bg-white shadow-md p-4 flex items-center justify-between z-10 rounded-b-3xl">
+               <button onClick={() => setIsSidebarOpen(true)} className="text-gray-600 hover:text-gray-800 transition-colors">
+                 <svg xmlns="http://www.w3.org/2000/svg" className="h-7 w-7" viewBox="0 0 24 24" fill="currentColor">
+                   <path fillRule="evenodd" d="M3 6.75A.75.75 0 013.75 6h16.5a.75.75 0 010 1.5H3.75A.75.75 0 013 6.75zM3 12a.75.75 0 01.75-.75h16.5a.75.75 0 010 1.5H3.75A.75.75 0 013 12zm0 5.25a.75.75 0 01.75-.75h16.5a.75.75 0 010 1.5H3.75a.75.75 0 01-.75-.75z" clipRule="evenodd" />
+                 </svg>
+               </button>
+               <h1 className="text-2xl font-bold text-gray-800">
+                 {currentView === 'todos' ? '待办事项' : '打卡日历'}
+               </h1>
+               {currentView === 'todos' && (
+                 <div className="flex flex-col items-center">
+                   <span className="text-sm font-medium text-gray-500">
+                     剩余: {remainingTasks}
+                   </span>
+                   <span className="text-sm font-bold text-indigo-500">
+                     打卡: {checkinStreak}天
+                   </span>
+                 </div>
+               )}
+             </div>
+
+             <div className={`sidebar fixed top-0 left-0 w-64 h-full bg-white shadow-xl z-20 flex flex-col p-6 rounded-r-3xl ${isSidebarOpen ? 'open' : ''}`}>
+               <div className="flex justify-end mb-8">
+                 <button onClick={() => setIsSidebarOpen(false)} className="text-gray-600 hover:text-gray-800 transition-colors">
+                   <svg xmlns="http://www.w3.org/2000/svg" className="h-7 w-7" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                     <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                   </svg>
+                 </button>
+               </div>
+               
+               <div className="flex flex-col items-center space-y-4 mb-8">
+                 {userAvatarUrl ? (
+                   <img src={userAvatarUrl} alt="用户头像" className="w-20 h-20 rounded-full object-cover border-4 border-gray-200" />
+                 ):(
